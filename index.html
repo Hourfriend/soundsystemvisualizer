@@ -1,4 +1,4 @@
-<!DOCTYPE html><!-- bust:1778140464 -->
+<!DOCTYPE html><!-- bust:1783285700 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -53,6 +53,17 @@ body.panel-collapsed #ptab-arrow{transform:rotate(180deg);}
 .ldesc{font-family:var(--fm);font-size:7px;letter-spacing:.1em;color:rgba(255,255,255,0.18);}
 .abar-wrap{height:2px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;}
 .abar{height:100%;width:0%;background:#fff;border-radius:2px;box-shadow:0 0 4px #fff;}
+
+/* ── Frequency range selector ─────────────────────────────────────────────── */
+.freq-wrap{display:flex;flex-direction:column;gap:4px;}
+.freq-label{font-family:var(--fm);font-size:7px;letter-spacing:.15em;color:rgba(255,255,255,0.28);text-transform:uppercase;}
+.freq-track-wrap{position:relative;height:16px;display:flex;align-items:center;}
+.freq-track{position:absolute;left:0;right:0;height:2px;background:rgba(255,255,255,0.10);border-radius:2px;pointer-events:none;}
+.freq-fill{position:absolute;height:2px;background:rgba(255,255,255,0.5);border-radius:2px;pointer-events:none;box-shadow:0 0 5px rgba(255,255,255,0.3);}
+.freq-range{position:absolute;left:0;right:0;width:100%;appearance:none;-webkit-appearance:none;background:transparent;pointer-events:none;height:16px;margin:0;}
+.freq-range::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:10px;height:10px;border-radius:50%;background:#fff;box-shadow:0 0 4px #fff;pointer-events:auto;cursor:pointer;margin-top:-4px;}
+.freq-range::-moz-range-thumb{width:10px;height:10px;border-radius:50%;background:#fff;border:none;box-shadow:0 0 4px #fff;pointer-events:auto;cursor:pointer;}
+.freq-vals{display:flex;justify-content:space-between;font-family:var(--fm);font-size:7px;color:rgba(255,255,255,0.35);letter-spacing:.05em;}
 .lsrow{display:flex;align-items:center;gap:6px;}
 .lsrow .ll{font-family:var(--fm);font-size:7px;letter-spacing:.12em;color:rgba(255,255,255,0.25);white-space:nowrap;width:56px;flex-shrink:0;}
 .lsrow .lv{font-family:var(--fm);font-size:7px;color:rgba(255,255,255,0.3);width:26px;text-align:right;flex-shrink:0;}
@@ -240,10 +251,10 @@ const BANDS = [
 ];
 
 const LAYER_DEFS = [
-  {id:'bass',    label:'Bass Bins',  imgKey:'bass',    def:'Bass',     desc:'Sub & bass cabinets'},
-  {id:'mids',    label:'Mids',       imgKey:'mids',    def:'Mid',      desc:'Mid-range horn section'},
-  {id:'midhigh', label:'Mid-High',   imgKey:'midhigh', def:'High Mid', desc:'Mid-high cabinet'},
-  {id:'highs',   label:'High Horn',  imgKey:'highs',   def:'Treble',   desc:'High frequency horn'},
+  {id:'bass',    label:'Bass Bins',  imgKey:'bass',    freqLo:40,   freqHi:250,  desc:'Sub & bass cabinets'},
+  {id:'mids',    label:'Mids',       imgKey:'mids',    freqLo:250,  freqHi:2000, desc:'Mid-range horn section'},
+  {id:'midhigh', label:'Mid-High',   imgKey:'midhigh', freqLo:2000, freqHi:6000, desc:'Mid-high cabinet'},
+  {id:'highs',   label:'High Horn',  imgKey:'highs',   freqLo:6000, freqHi:20000,desc:'High frequency horn'},
 ];
 
 // State
@@ -255,7 +266,7 @@ let doLoop=false, mode='idle';
 let sensitivity=1.5, glowAmt=12, baseBright=20;
 let doTrails=false, doShake=true;
 let layers = {};
-LAYER_DEFS.forEach(d => { layers[d.id] = {band:d.def, sens:1.5, scaleBoost:0.5, amp:0, as:0, peak:0, vel:0}; });
+LAYER_DEFS.forEach(d => { layers[d.id] = {freqLo:d.freqLo, freqHi:d.freqHi, sens:1.5, scaleBoost:0.5, amp:0, as:0, peak:0, vel:0}; });
 let mediaRec=null, recChunks=[], recStartTime=0, recTimerInterval=null, isRecording=false;
 const shakeState = {};
 LAYER_DEFS.forEach(d => { shakeState[d.id] = {x:0, y:0, vx:0, vy:0}; });
@@ -275,22 +286,69 @@ document.addEventListener('fullscreenchange', () => {
   document.getElementById('fs-btn').textContent = document.fullscreenElement ? '\u2715' : '\u26F6';
 });
 
-// Build layer cards
+// Build layer cards — custom dual-range frequency selector
 const ll = document.getElementById('layers-list');
 ll.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+const FREQ_MIN = 20, FREQ_MAX = 20000;
+
+// Log-scale helpers so the slider feels musical
+function freqToLog(f) { return Math.log10(f / FREQ_MIN) / Math.log10(FREQ_MAX / FREQ_MIN); }
+function logToFreq(v) { return Math.round(FREQ_MIN * Math.pow(FREQ_MAX / FREQ_MIN, v)); }
+function fmtHz(f)     { return f >= 1000 ? (f/1000).toFixed(f%1000===0?0:1)+'k' : f+'Hz'; }
+
 LAYER_DEFS.forEach(d => {
   const c = document.createElement('div');
   c.className = 'lc';
-  const opts = BANDS.map(b => '<option value="' + b.name + '"' + (b.name===d.def?' selected':'') + '>' + b.name + ' (' + b.range[0] + '\u2013' + b.range[1] + 'Hz)</option>').join('');
   c.innerHTML =
     '<div class="lc-title"><div class="ldot" id="dot-' + d.id + '"></div>' + d.label + '</div>' +
     '<div class="ldesc">' + d.desc + '</div>' +
-    '<select id="sel-' + d.id + '">' + opts + '</select>' +
+
+    // Frequency range
+    '<div class="freq-wrap">' +
+      '<span class="freq-label">Freq Range</span>' +
+      '<div class="freq-track-wrap">' +
+        '<div class="freq-track"></div>' +
+        '<div class="freq-fill" id="ff-' + d.id + '"></div>' +
+        '<input type="range" class="freq-range" id="flo-' + d.id + '" min="0" max="1000" step="1" value="' + Math.round(freqToLog(d.freqLo)*1000) + '">' +
+        '<input type="range" class="freq-range" id="fhi-' + d.id + '" min="0" max="1000" step="1" value="' + Math.round(freqToLog(d.freqHi)*1000) + '">' +
+      '</div>' +
+      '<div class="freq-vals"><span id="flov-' + d.id + '">' + fmtHz(d.freqLo) + '</span><span id="fhiv-' + d.id + '">' + fmtHz(d.freqHi) + '</span></div>' +
+    '</div>' +
+
     '<div class="lsrow"><span class="ll">Sensitivity</span><input type="range" id="ls-' + d.id + '" min="0.2" max="8" step="0.1" value="1.5" style="flex:1;height:2px;"><span class="lv" id="lsv-' + d.id + '">1.5x</span></div>' +
     '<div class="lsrow"><span class="ll">Scale Boost</span><input type="range" id="lsc-' + d.id + '" min="0" max="2" step="0.05" value="0.5" style="flex:1;height:2px;"><span class="lv" id="lscv-' + d.id + '">0.50</span></div>' +
     '<div class="abar-wrap"><div class="abar" id="bar-' + d.id + '"></div></div>';
   ll.appendChild(c);
-  document.getElementById('sel-' + d.id).addEventListener('change', e => { layers[d.id].band = e.target.value; });
+
+  const sLo  = document.getElementById('flo-'  + d.id);
+  const sHi  = document.getElementById('fhi-'  + d.id);
+  const vLo  = document.getElementById('flov-' + d.id);
+  const vHi  = document.getElementById('fhiv-' + d.id);
+  const fill = document.getElementById('ff-'   + d.id);
+
+  function updateFill() {
+    const lo = parseInt(sLo.value), hi = parseInt(sHi.value);
+    fill.style.left  = (lo / 10) + '%';
+    fill.style.width = (Math.max(0, hi - lo) / 10) + '%';
+  }
+  updateFill();
+
+  sLo.addEventListener('input', () => {
+    if (parseInt(sLo.value) > parseInt(sHi.value) - 10) sLo.value = parseInt(sHi.value) - 10;
+    const f = logToFreq(parseInt(sLo.value) / 1000);
+    layers[d.id].freqLo = f;
+    vLo.textContent = fmtHz(f);
+    updateFill();
+  });
+  sHi.addEventListener('input', () => {
+    if (parseInt(sHi.value) < parseInt(sLo.value) + 10) sHi.value = parseInt(sLo.value) + 10;
+    const f = logToFreq(parseInt(sHi.value) / 1000);
+    layers[d.id].freqHi = f;
+    vHi.textContent = fmtHz(f);
+    updateFill();
+  });
+
   document.getElementById('ls-' + d.id).addEventListener('input', e => {
     layers[d.id].sens = parseFloat(e.target.value);
     document.getElementById('lsv-' + d.id).textContent = parseFloat(e.target.value).toFixed(1) + 'x';
@@ -438,13 +496,13 @@ function st(msg) { document.getElementById('status').textContent = msg; }
 function fmt(s) { const m=Math.floor(s/60),ss=Math.floor(s%60); return m+':'+ss.toString().padStart(2,'0'); }
 
 // Frequency analysis
-function getBandAmp(name, layerSens) {
+function getBandAmp(id, layerSens) {
   if (!analyser || !dataArray || !isRunning) return 0;
   analyser.getByteFrequencyData(dataArray);
-  const b = BANDS.find(x => x.name === name); if (!b) return 0;
+  const L = layers[id];
   const nyq = audioCtx.sampleRate / 2, bins = analyser.frequencyBinCount;
-  const lo = Math.max(0, Math.floor(b.range[0] / nyq * bins));
-  const hi = Math.min(bins-1, Math.ceil(b.range[1] / nyq * bins));
+  const lo = Math.max(0,      Math.floor(L.freqLo / nyq * bins));
+  const hi = Math.min(bins-1, Math.ceil( L.freqHi / nyq * bins));
   let s = 0; for (let i=lo; i<=hi; i++) s += dataArray[i];
   return Math.min(1, (hi > lo ? s / ((hi-lo+1)*255) : 0) * sensitivity * layerSens);
 }
@@ -562,7 +620,7 @@ function animate() {
   // Amplitude smoothing with punch
   Object.keys(layers).forEach(id => {
     const L = layers[id];
-    const tgt = getBandAmp(L.band, L.sens);
+    const tgt = getBandAmp(id, L.sens);
     L.as += (tgt - L.as) * (tgt > L.as ? 0.45 : 0.06);
     if (tgt > L.peak + 0.07) { L.vel += (tgt - L.peak) * 0.55; L.peak = tgt; }
     L.peak *= 0.92; L.vel *= 0.70;
